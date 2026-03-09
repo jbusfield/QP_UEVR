@@ -12,8 +12,9 @@ local interaction = require('libs/interaction')
 local ui = require('libs/ui')
 local remap = require('libs/remap')
 local gestures = require('libs/gestures')
+local ik = require('libs/ik')
 
-uevrUtils.setLogLevel(LogLevel.Debug)
+--uevrUtils.setLogLevel(LogLevel.Debug)
 -- reticule.setLogLevel(LogLevel.Debug)
 -- -- input.setLogLevel(LogLevel.Debug)
 -- attachments.setLogLevel(LogLevel.Debug)
@@ -22,6 +23,7 @@ uevrUtils.setLogLevel(LogLevel.Debug)
 -- remap.setLogLevel(LogLevel.Debug)
 -- --hands.setLogLevel(LogLevel.Debug)
 --interaction.setLogLevel(LogLevel.Debug)
+--ik.setLogLevel(LogLevel.Debug)
 
 
 --uevrUtils.setDeveloperMode(true)
@@ -36,10 +38,12 @@ reticule.init()
 pawnModule.init()
 remap.init()
 input.init()
+ik.init()
+hands.setAutoCreateHands(false)
 
 local status = {}
 
-local versionTxt = "v1.0.0"
+local versionTxt = "v1.0.1"
 local title = "A Quiet Place: The Road Ahead, First Person Mod " .. versionTxt
 local configDefinition = {
 	{
@@ -60,7 +64,14 @@ local configDefinition = {
 				expandArray(reticule.getConfigurationWidgets,{{id="uevr_reticule_eye_dominance",isHidden=true},{id="uevr_reticule_eye_dominance_offset",isHidden=true}}),
 			{ widgetType = "end_rect", additionalSize = 12, rounding = 5 }, { widgetType = "unindent", width = 20 },
 			{ widgetType = "new_line" },
-			-- { widgetType = "indent", width = 20 }, { widgetType = "text", label = "Control" }, { widgetType = "begin_rect", },
+			{ widgetType = "indent", width = 20 }, { widgetType = "text", label = "Control" }, { widgetType = "begin_rect", },
+                {
+                    widgetType = "combo",
+                    id = "hands_type",
+                    label = "Hands Type",
+                    selections = {"Forearms", "IK Arms"},
+                    initialValue = 1,
+                },
 			-- 	{
 			-- 		widgetType = "checkbox",
 			-- 		id = "test_1",
@@ -72,8 +83,8 @@ local configDefinition = {
 			-- 		id = "pawn_offset",
 			-- 		label = "Free Me",
 			-- 	},
-            -- { widgetType = "end_rect", additionalSize = 12, rounding = 5 }, { widgetType = "unindent", width = 20 },
-			-- { widgetType = "new_line" },
+            { widgetType = "end_rect", additionalSize = 12, rounding = 5 }, { widgetType = "unindent", width = 20 },
+			{ widgetType = "new_line" },
 		}
 	}
 }
@@ -242,10 +253,14 @@ end
 
 attachments.registerOnGripUpdateCallback(function()
     local weaponMeshLeft, weaponMeshRight, attachOptionsRight, attachOptionsLeft = getWeaponMesh()
-    local leftHand = controllers.getController(Handed.Left)
-    local rightHand = controllers.getController(Handed.Right)
-    --print(weaponMeshLeft, weaponMeshRight, attachOptionsRight, attachOptionsLeft, rightHand, leftHand)
-	return weaponMeshRight, rightHand, weaponMeshRight and weaponMeshRight.AttachSocketName or nil, weaponMeshLeft, leftHand, weaponMeshLeft and weaponMeshLeft.AttachSocketName or nil, attachOptionsRight, attachOptionsLeft
+    if status["ikMeshComponent"] ~= nil then
+        return weaponMeshRight, status["ikMeshComponent"], "Cup_R", weaponMeshLeft, status["ikMeshComponent"], "Weapon_L", attachOptionsRight, attachOptionsLeft
+    else
+        local leftHand = hands.getHandComponent(Handed.Left) --controllers.getController(Handed.Left)
+        local rightHand = hands.getHandComponent(Handed.Right) --controllers.getController(Handed.Right)
+        --print(weaponMeshLeft, weaponMeshRight, attachOptionsRight, attachOptionsLeft, rightHand, leftHand)
+        return weaponMeshRight, rightHand, "Cup_R", weaponMeshLeft, leftHand, "Weapon_L", attachOptionsRight, attachOptionsLeft
+    end
 end)
 
 attachments.registerAttachmentChangeCallback(function(id, gripHand, attachment)
@@ -258,13 +273,12 @@ function on_montage_change(montageObject, montageName)
 end
 
 function on_post_engine_tick(engine, delta)
-    ---print("here",pawn["Is Player Animation Mode"])
 	if uevrUtils.getValid(pawn) ~= nil then
         --Extermely important. Cutscenes and narrow passages are broken without this
         if pawn.bUseControllerRotationYaw ~= nil then
             pawn.bUseControllerRotationYaw = false -- always disable controller rotation on the pawn, even in cutscenes when input is disabled
         end
-        
+
         local isDefaultPawn = pawn["Is Player Animation Mode"] ~= nil
         if status["isDefaultPawn"] ~= isDefaultPawn then
             status["isDefaultPawn"] = isDefaultPawn
@@ -296,8 +310,7 @@ uevrUtils.registerOnInputGetStateCallback(function(retval, user_index, state)
             end
         end
     end
-
-end) --increased priority to get values before remap occurs
+end)
 
 local function cleanup()
 	if uevrUtils.getValid(status["maskEffectComponent"]) ~= nil then
@@ -308,6 +321,13 @@ local function cleanup()
     if status["crankChild"] ~= nil then
         destroyCrank()
     end
+
+    if status.meshCopy ~= nil then
+		uevrUtils.destroyComponent(status.meshCopy, true, true)
+		status.meshCopy = nil
+	end
+
+    status = {}
 end
 
 uevr.params.sdk.callbacks.on_script_reset(function()
@@ -338,8 +358,32 @@ local function attachGasMaskEffectToHMD()
     --print("Failed to attach mask effect to hud")
 end
 
+local function regenerateHands(value)
+	--detach attachments first so they dont get "lost" when hands are destroyed
+	-- attachments.detachGripAttachments(Handed.Right)
+	-- attachments.detachGripAttachments(Handed.Left)
+
+    hands.setAutoCreateHands(value == 1)
+    hands.destroyHands()
+    ik.destroyAll()
+    status["ikMeshComponent"] = nil
+    if value == 2 then
+        -- First scene montage uses wrong hands if we dont delay here
+        -- status param prevents multiple IK creations during rapid level changes
+        status.creatingIKCount = status.creatingIKCount ~= nil and status.creatingIKCount + 1 or 1
+        delay(2000, function()
+            status.creatingIKCount = status.creatingIKCount - 1
+            if status.creatingIKCount == 0 then
+                ik.new({ animationsFile = "hands_parameters" })
+            end
+        end)
+    end
+end
+
 function on_level_change()
+    print("Level change detected, cleaning up...")
 	cleanup()
+    regenerateHands(configui.getValue("hands_type"))
 end
 
 setInterval(1000, function()
@@ -356,27 +400,19 @@ setInterval(1000, function()
     end
 end)
 
--- local isPaused = false
--- register_key_bind("F1", function()
--- 	isPaused = not isPaused
---     print("Game paused: " .. tostring(isPaused))
--- 	uevrUtils.pauseGame(isPaused)
--- end)
+ik.registerOnMeshCreatedCallback(function(meshComponent, ikInstance)
+    --print("IK Mesh created:", meshComponent ~= nil, ikInstance ~= nil and ikInstance.rigId or "")
+    if meshComponent ~= nil then
+        meshComponent.bCastDynamicShadow = false
+        meshComponent.bRenderInDepthPass = false
+        animation.setComponent("left_arms", meshComponent)
+		animation.setComponent("right_arms", meshComponent)
+        status["ikMeshComponent"] = meshComponent
+    end
+end)
 
--- register_key_bind("F2", function()
---     print("F2 pressed")
---     --attachGasMaskEffectToHMD()
--- end)
+configui.onUpdate("hands_type", function(value)
+    regenerateHands(value)
+end)
 
--- configui.onUpdate("test_1", function(value)
---     isPaused = not isPaused
---     print("Game paused: " .. tostring(isPaused))
---     uevrUtils.pauseGame(isPaused)
--- end)
-
--- configui.onUpdate("pawn_offset", function()
---     if pawn ~= nil then
---         pawn:K2_AddActorLocalOffset(uevrUtils.vector(100, 0, 200), false, reusable_hit_result, true)
---     end
--- end)
 

@@ -134,12 +134,14 @@ local uevrUtils = require("libs/uevr_utils")
 local controllers = require("libs/controllers")
 local animation = require("libs/animation")
 local attachments = require("libs/attachments")
-local accessories = require("libs/accessories")
+local handsAnimation = require("libs/hands_animation")
+local accessoriesConfig = require("libs/config/accessories_config_dev")
 local pawnModule = require("libs/pawn")
+require("libs/accessories")
 
 local M = {}
 
-local autoHandleInput = true
+--local autoHandleInput = true
 local autoCreateHands = true
 local autoCreateConfigName = nil
 local autoCreateAnimationName = nil
@@ -151,10 +153,10 @@ local handDefinitions = {}
 local handBoneList = {} --used for debugging
 local offset={X=0, Y=0, Z=0, Pitch=0, Yaw=0, Roll=0}
 local ignoreRelativeOffset = false
-local inputHandlerAnimID = {} --list of animID only used for the default input handler
+--local inputHandlerAnimID = {} --list of animID only used for the default input handler
 local handsConfig = nil -- the configuration tool for creating hands in game
-local holdingAttachment = {}
-local disableAnimations = false --used during hand configuration to prevent loaded animation from interfering
+--local holdingAttachment = {}
+--local disableAnimations = false --used during hand configuration to prevent loaded animation from interfering
 
 --externally controlled animations
 local armsAnimationMeshes = {}
@@ -162,7 +164,13 @@ armsAnimationMeshes[Handed.Left] = {animating=false, mesh=nil, componentName=nil
 armsAnimationMeshes[Handed.Right] = {animating=false, mesh=nil, componentName=nil}
 local defaultAnimationMesh = nil
 
+local status = {}
 local accessoryStatus = {}
+
+local gunstockOffsetsEnabled = false
+function M.setGunstockOffsetsEnabled(val)
+	gunstockOffsetsEnabled = val
+end
 
 local currentLogLevel = LogLevel.Error
 function M.setLogLevel(val)
@@ -196,22 +204,23 @@ function M.registerIsAnimatingFromMeshCallback(func)
 	uevrUtils.registerUEVRCallback("is_hands_animating_from_mesh", func)
 end
 
-local createInputHandler = doOnce(function()
-	attachments.registerOnGripAnimationCallback(function(gripAnimation, gripHand)
-		M.print("Grip animation changed to " .. (gripAnimation and tostring(gripAnimation) or "None") .. " for " .. (gripHand == Handed.Left and "Left" or "Right") .. " hand", LogLevel.Debug)
-		--print("Grip animation changed to ", gripAnimation, gripHand)
-		M.updateAnimationState(gripHand)
-	end)
 
-	uevrUtils.registerOnPreInputGetStateCallback(function(retval, user_index, state)
-		if autoHandleInput and M.exists() then
-			local rightAttachment = holdingAttachment[Handed.Right] or attachments.getCurrentGripAnimation(Handed.Right)
-			local leftAttachment = holdingAttachment[Handed.Left] or attachments.getCurrentGripAnimation(Handed.Left)
-			--M.handleInput(state, attachment, Handed.Right, nil, true)
-			M.handleInputForHands(state, rightAttachment, leftAttachment, nil, true)
-		end
-	end, 10) --high priority to intercept messages before possible remapper
-end, Once.EVER)
+-- local createInputHandler = doOnce(function()
+-- 	attachments.registerOnGripAnimationCallback(function(gripAnimation, gripHand)
+-- 		M.print("Grip animation changed to " .. (gripAnimation and tostring(gripAnimation) or "None") .. " for " .. (gripHand == Handed.Left and "Left" or "Right") .. " hand", LogLevel.Debug)
+-- 		--print("Grip animation changed to ", gripAnimation, gripHand)
+-- 		M.updateAnimationState(gripHand)
+-- 	end)
+
+-- 	uevrUtils.registerOnPreInputGetStateCallback(function(retval, user_index, state)
+-- 		if autoHandleInput and M.exists() then
+-- 			local rightAttachment = holdingAttachment[Handed.Right] or attachments.getCurrentGripAnimation(Handed.Right)
+-- 			local leftAttachment = holdingAttachment[Handed.Left] or attachments.getCurrentGripAnimation(Handed.Left)
+-- 			--M.handleInput(state, attachment, Handed.Right, nil, true)
+-- 			M.handleInputForHands(state, rightAttachment, leftAttachment, nil, true)
+-- 		end
+-- 	end, 10) --high priority to intercept messages before possible remapper
+-- end, Once.EVER)
 
 local function getValidVector(definition, id, default)
 	if definition == nil or id == nil or definition[id] == nil then
@@ -238,17 +247,18 @@ local function getComponentName(componentName)
 	return foundName == nil and "" or foundName
 end
 
-local function getAnimIDSuffix(animID)
-	local arr = uevrUtils.splitStr(animID, "_")
-	return #arr > 0 and arr[#arr] or nil
-end
+-- local function getAnimIDSuffix(animID)
+-- 	local arr = uevrUtils.splitStr(animID, "_")
+-- 	return #arr > 0 and arr[#arr] or nil
+-- end
 
 function M.enableConfigurationTool()
 	handsConfig = require('libs/config/hands_config')
 end
 
 function M.setAutoHandleInput(val)
-	autoHandleInput = val
+	--autoHandleInput = val
+	handsAnimation.setAutoHandleInput(val)
 end
 
 function M.setAutoCreateHands(val)
@@ -256,8 +266,9 @@ function M.setAutoCreateHands(val)
 end
 
 function M.setHoldingAttachment(hand, val)
-	holdingAttachment[hand] = val
-	M.updateAnimationState(hand)
+	-- holdingAttachment[hand] = val
+	-- M.updateAnimationState(hand)
+	handsAnimation.setHoldingAttachment(hand, val)
 end
 
 function M.reset()
@@ -266,7 +277,7 @@ function M.reset()
 	handBoneList = {}
 	offset={X=0, Y=0, Z=0, Pitch=0, Yaw=0, Roll=0}
 	ignoreRelativeOffset = false
-	inputHandlerAnimID = {}
+	--inputHandlerAnimID = {}
 	armsAnimationMeshes[Handed.Left] = {animating=false, mesh=nil, componentName=nil}
 	armsAnimationMeshes[Handed.Right] = {animating=false, mesh=nil, componentName=nil}
 	defaultAnimationMesh = nil
@@ -313,44 +324,45 @@ local function registerFOVFix(profile)
 	end
 end
 
-local function getAttachmentStateAndExtension(attachment)
-	local isHoldingAttachment = false
-	local attachmentExtension = ""
-	if type(attachment) == "boolean" then
-		isHoldingAttachment = attachment
-	elseif type(attachment) == "string" and attachment ~= "attachment_none" then
-		isHoldingAttachment = true
-		if attachment ~= "" then
-			attachmentExtension = "_" .. attachment
-		end
-	end
-	return isHoldingAttachment, attachmentExtension
-end
+-- local function getAttachmentStateAndExtension(attachment)
+-- 	local isHoldingAttachment = false
+-- 	local attachmentExtension = ""
+-- 	if type(attachment) == "boolean" then
+-- 		isHoldingAttachment = attachment
+-- 	elseif type(attachment) == "string" and attachment ~= "attachment_none" then
+-- 		isHoldingAttachment = true
+-- 		if attachment ~= "" then
+-- 			attachmentExtension = "_" .. attachment
+-- 		end
+-- 	end
+-- 	return isHoldingAttachment, attachmentExtension
+-- end
 
 function M.updateAnimationState(hand)
-	if M.exists() then
-		local attachment = holdingAttachment[hand]
-		if attachment == nil then
-			attachment = attachments.getCurrentGripAnimation(hand)
-		end
-		M.print("Updating animation state for " .. (hand == Handed.Left and "Left" or "Right") .. " hand with attachment: " .. (type(attachment) == "string" and attachment or tostring(attachment)), LogLevel.Debug)
-		local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
-		M.print("Is holding attachment: " .. tostring(isHoldingAttachment), LogLevel.Debug)
+	handsAnimation.updateAnimationState(hand)
+	-- if M.exists() then
+	-- 	local attachment = holdingAttachment[hand]
+	-- 	if attachment == nil then
+	-- 		attachment = attachments.getCurrentGripAnimation(hand)
+	-- 	end
+	-- 	M.print("Updating animation state for " .. (hand == Handed.Left and "Left" or "Right") .. " hand with attachment: " .. (type(attachment) == "string" and attachment or tostring(attachment)), LogLevel.Debug)
+	-- 	local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
+	-- 	M.print("Is holding attachment: " .. tostring(isHoldingAttachment), LogLevel.Debug)
 
-		if isHoldingAttachment then
-			for id, target in pairs(inputHandlerAnimID) do
-				local handStr = hand == Handed.Left and "left" or "right"
-				animation.resetAnimation(handStr.."_"..target, handStr.."_grip_weapon" .. attachmentExtension, true) --forces an update regardless of current state
-				animation.resetAnimation(handStr.."_"..target, handStr.."_trigger_weapon" .. attachmentExtension, true) --forces an update regardless of current state
-				animation.pose(handStr .. "_" .. target, "grip_" .. handStr .. "_weapon" .. attachmentExtension)
-			end
-		else
-			for id, target in pairs(inputHandlerAnimID) do
-				local handStr = hand == Handed.Left and "left" or "right"
-				animation.pose(handStr .. "_" .. target, "open_" .. handStr)
-			end
-		end
-	end
+	-- 	if isHoldingAttachment then
+	-- 		for id, target in pairs(inputHandlerAnimID) do
+	-- 			local handStr = hand == Handed.Left and "left" or "right"
+	-- 			animation.resetAnimation(handStr.."_"..target, handStr.."_grip_weapon" .. attachmentExtension, true) --forces an update regardless of current state
+	-- 			animation.resetAnimation(handStr.."_"..target, handStr.."_trigger_weapon" .. attachmentExtension, true) --forces an update regardless of current state
+	-- 			animation.pose(handStr .. "_" .. target, "grip_" .. handStr .. "_weapon" .. attachmentExtension)
+	-- 		end
+	-- 	else
+	-- 		for id, target in pairs(inputHandlerAnimID) do
+	-- 			local handStr = hand == Handed.Left and "left" or "right"
+	-- 			animation.pose(handStr .. "_" .. target, "open_" .. handStr)
+	-- 		end
+	-- 	end
+	-- end
 end
 
 function M.createFromConfig(configuration, profileName, animationName)
@@ -398,8 +410,9 @@ function M.createFromConfig(configuration, profileName, animationName)
 			M.create(components, profile, animations)
 
 			--if M.exists() then
+				-- TODO replace this with a global event
 				attachments.setAnimationIDs(configuration["attachments"])
-				accessories.setAnimationIDs(configuration["attachments"])
+				accessoriesConfig.setAnimationIDs(configuration["attachments"])
 				--going to need to call fixMeshFOV on lazy poll
 				for name, handComponent in pairs(handComponents) do
 					--print(name, profileName, handComponent[0], handComponent[1])
@@ -451,19 +464,23 @@ function M.create(skeletalMeshComponent, definition, handAnimations)
 
 						local animID = skeletalMeshDefinition[index==Handed.Left and "Left" or "Right"]["AnimationID"]
 						if animID ~= nil then
-							local suffix = getAnimIDSuffix(animID)
-							if suffix ~= nil then inputHandlerAnimID[animID] = suffix end
-							animation.add(animID, handComponents[name][index], handAnimations)
-							animation.initialize(animID, handComponents[name][index])
+							-- local suffix = getAnimIDSuffix(animID)
+							-- if suffix ~= nil then inputHandlerAnimID[animID] = suffix end
+							-- print("@@@@@@",animID, suffix)
+							-- animation.add(animID, handComponents[name][index], handAnimations)
+							-- animation.initialize(animID, handComponents[name][index])
+							handsAnimation.createAnimationHandler(animID, handComponents[name][index], handAnimations)
 						end
 						executeOnCreatedCallback(index, handComponents[name][index])
 					end
 				end
-				if autoHandleInput == true then
-					createInputHandler()
-					M.updateAnimationState(Handed.Left)
-					M.updateAnimationState(Handed.Right)
-				end
+				--if autoHandleInput == true then
+					-- createInputHandler()
+					-- M.updateAnimationState(Handed.Left)
+					-- M.updateAnimationState(Handed.Right)
+					handsAnimation.updateAnimationState(Handed.Left)
+					handsAnimation.updateAnimationState(Handed.Right)
+				--end
 			else
 				M.print("Call to create " .. name .. " failed, invalid skeletalMeshComponent", LogLevel.Info )
 			end
@@ -573,6 +590,7 @@ function M.updateAnimationFromMesh(hand, mesh, componentName)
 				if jointName ~= nil and jointName ~= "" then
 					local success, response = pcall(function()
 						component:CopyPoseFromSkeletalComponent(mesh)
+						--print("here", component:get_full_name())
 						--component:SetLeaderPoseComponent(mesh, true)
 						local location = getValidVector(definition, "Location", {0,0,0})
 						local rotation = getValidRotator(definition, "Rotation", {0,0,0})
@@ -622,97 +640,100 @@ end
 
 --set overrideTrigger to true if the default triggers have already been swapped (ie a plugin or code aleady makes the game do right trigger actions when the left trigger is pulled)
 function M.handleInput(state, attachment, hand, overrideTrigger, allowAutoHandle)
-	if allowAutoHandle ~= true then
-		autoHandleInput = false --if something else is calling this then dont auto handle input
-	end
-	if disableAnimations then
-		--print("Animations are disabled, skipping handleInput")
-		return true
-	end
+	handsAnimation.handleInput(state, attachment, hand, overrideTrigger, allowAutoHandle)
+-- 	if allowAutoHandle ~= true then
+-- 		autoHandleInput = false --if something else is calling this then dont auto handle input
+-- 	end
+-- 	if disableAnimations then
+-- 		--print("Animations are disabled, skipping handleInput")
+-- 		return true
+-- 	end
 
-	local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
+-- 	local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
 
-	if hand == nil then hand = Handed.Right end
-	if overrideTrigger == nil then overrideTrigger = false end
-	local isRightHanded = hand == Handed.Right
-	local weaponHandStr = isRightHanded and "right" or "left"
-	local offHandStr = isRightHanded and "left" or "right"
-	local animDuration = 0.1
-	for id, target in pairs(inputHandlerAnimID) do
-		local offhandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bLeftTrigger or state.Gamepad.bRightTrigger
-		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_trigger", offhandTriggerValue > 100, {duration=animDuration})
+-- 	if hand == nil then hand = Handed.Right end
+-- 	if overrideTrigger == nil then overrideTrigger = false end
+-- 	local isRightHanded = hand == Handed.Right
+-- 	local weaponHandStr = isRightHanded and "right" or "left"
+-- 	local offHandStr = isRightHanded and "left" or "right"
+-- 	local animDuration = 0.1
+-- 	for id, target in pairs(inputHandlerAnimID) do
+-- 		local offhandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bLeftTrigger or state.Gamepad.bRightTrigger
+-- 		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_trigger", offhandTriggerValue > 100, {duration=animDuration})
 
-		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_grip", uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_LEFT_SHOULDER or XINPUT_GAMEPAD_RIGHT_SHOULDER), {duration=animDuration})
+-- 		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_grip", uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_LEFT_SHOULDER or XINPUT_GAMEPAD_RIGHT_SHOULDER), {duration=animDuration})
 
-		local offhandController = uevr.params.vr.get_left_joystick_source()
-		if not isRightHanded then offhandController = uevr.params.vr.get_right_joystick_source() end
-		local offhandRest = uevr.params.vr.get_action_handle(isRightHanded and "/actions/default/in/ThumbrestTouchLeft" or "/actions/default/in/ThumbrestTouchRight")
-		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_thumb", uevr.params.vr.is_action_active(offhandRest, offhandController), {duration=animDuration})
+-- 		local offhandController = uevr.params.vr.get_left_joystick_source()
+-- 		if not isRightHanded then offhandController = uevr.params.vr.get_right_joystick_source() end
+-- 		local offhandRest = uevr.params.vr.get_action_handle(isRightHanded and "/actions/default/in/ThumbrestTouchLeft" or "/actions/default/in/ThumbrestTouchRight")
+-- 		animation.updateAnimation(offHandStr.."_"..target, offHandStr.."_thumb", uevr.params.vr.is_action_active(offhandRest, offhandController), {duration=animDuration})
 
-		if not isHoldingAttachment then
-			local weaponHandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
-			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_trigger", weaponHandTriggerValue > 100, {duration=animDuration})
+-- 		if not isHoldingAttachment then
+-- 			local weaponHandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
+-- 			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_trigger", weaponHandTriggerValue > 100, {duration=animDuration})
 
-			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip", uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER), {duration=animDuration})
+-- 			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip", uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER), {duration=animDuration})
 
-			local weaponhandController = uevr.params.vr.get_right_joystick_source()
-			if not isRightHanded then weaponhandController = uevr.params.vr.get_left_joystick_source() end
-			local weaponhandRest = uevr.params.vr.get_action_handle(isRightHanded and "/actions/default/in/ThumbrestTouchRight" or "/actions/default/in/ThumbrestTouchLeft")
-			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_thumb", uevr.params.vr.is_action_active(weaponhandRest, weaponhandController), {duration=animDuration})
-		else
-			local weaponHandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
-			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_trigger_weapon" .. attachmentExtension, weaponHandTriggerValue > 100, {duration=animDuration})
-			if uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER) then
-				animation.resetAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip_weapon" .. attachmentExtension, false) --forces an update regardless of current state
---print("Here",weaponHandStr.."_"..target,weaponHandStr.."_grip_weapon" .. attachmentExtension)
-				animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip_weapon" .. attachmentExtension, true, {duration=animDuration})
-			end
-		end
-	end
+-- 			local weaponhandController = uevr.params.vr.get_right_joystick_source()
+-- 			if not isRightHanded then weaponhandController = uevr.params.vr.get_left_joystick_source() end
+-- 			local weaponhandRest = uevr.params.vr.get_action_handle(isRightHanded and "/actions/default/in/ThumbrestTouchRight" or "/actions/default/in/ThumbrestTouchLeft")
+-- 			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_thumb", uevr.params.vr.is_action_active(weaponhandRest, weaponhandController), {duration=animDuration})
+-- 		else
+-- 			local weaponHandTriggerValue = (isRightHanded or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
+-- 			animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_trigger_weapon" .. attachmentExtension, weaponHandTriggerValue > 100, {duration=animDuration})
+-- 			if uevrUtils.isButtonPressed(state, isRightHanded and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER) then
+-- 				animation.resetAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip_weapon" .. attachmentExtension, false) --forces an update regardless of current state
+-- --print("Here",weaponHandStr.."_"..target,weaponHandStr.."_grip_weapon" .. attachmentExtension)
+-- 				animation.updateAnimation(weaponHandStr.."_"..target, weaponHandStr.."_grip_weapon" .. attachmentExtension, true, {duration=animDuration})
+-- 			end
+-- 		end
+-- 	end
 end
 
 function M.disableAnimations(value)
-	disableAnimations = value
+	--disableAnimations = value
+	handsAnimation.disableAnimations(value)
 end
 
 function M.handleInputForHands(state, rightAttachment, leftAttachment, overrideTrigger, allowAutoHandle)
-	if allowAutoHandle ~= true then
-		autoHandleInput = false --if something else is calling this then dont auto handle input
-	end
-	if disableAnimations then
-		--print("Animations are disabled, skipping handleInputForHands")
-		return true
-	end
+	handsAnimation.handleInputForHands(state, rightAttachment, leftAttachment, overrideTrigger, allowAutoHandle)
+	-- if allowAutoHandle ~= true then
+	-- 	autoHandleInput = false --if something else is calling this then dont auto handle input
+	-- end
+	-- if disableAnimations then
+	-- 	--print("Animations are disabled, skipping handleInputForHands")
+	-- 	return true
+	-- end
 
-	if overrideTrigger == nil then overrideTrigger = false end
-	local animDuration = 0.1
-	for id, target in pairs(inputHandlerAnimID) do
-		for hand = Handed.Left, Handed.Right do
-			local handStr = hand == Handed.Right and "right" or "left"
-			--do not use ternary operators like this. If right attachment is nil then it will always pick leftAttachment for Handed.Right == true
-			--local attachment = hand == Handed.Right and rightAttachment or leftAttachment
-			local attachment = nil
-			if hand == Handed.Right then attachment = rightAttachment else attachment = leftAttachment end
-			local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
-			--print("Handling input for " .. handStr .. " hand, attachment: " .. (type(attachment) == "string" and attachment or tostring(attachment)) .. ", isHoldingAttachment: " .. tostring(isHoldingAttachment) .. ", attachmentExtension: " .. attachmentExtension)
+	-- if overrideTrigger == nil then overrideTrigger = false end
+	-- local animDuration = 0.1
+	-- for id, target in pairs(inputHandlerAnimID) do
+	-- 	for hand = Handed.Left, Handed.Right do
+	-- 		local handStr = hand == Handed.Right and "right" or "left"
+	-- 		--do not use ternary operators like this. If right attachment is nil then it will always pick leftAttachment for Handed.Right == true
+	-- 		--local attachment = hand == Handed.Right and rightAttachment or leftAttachment
+	-- 		local attachment = nil
+	-- 		if hand == Handed.Right then attachment = rightAttachment else attachment = leftAttachment end
+	-- 		local isHoldingAttachment, attachmentExtension = getAttachmentStateAndExtension(attachment)
+	-- 		--print("Handling input for " .. handStr .. " hand, attachment: " .. (type(attachment) == "string" and attachment or tostring(attachment)) .. ", isHoldingAttachment: " .. tostring(isHoldingAttachment) .. ", attachmentExtension: " .. attachmentExtension)
 
-			if not isHoldingAttachment then
-				local weaponHandTriggerValue = (hand == Handed.Right or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
-				animation.updateAnimation(handStr.."_"..target, handStr.."_trigger", weaponHandTriggerValue > 100, {duration=animDuration})
-				animation.updateAnimation(handStr.."_"..target, handStr.."_grip", uevrUtils.isButtonPressed(state, hand == Handed.Right and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER), {duration=animDuration})
+	-- 		if not isHoldingAttachment then
+	-- 			local weaponHandTriggerValue = (hand == Handed.Right or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
+	-- 			animation.updateAnimation(handStr.."_"..target, handStr.."_trigger", weaponHandTriggerValue > 100, {duration=animDuration})
+	-- 			animation.updateAnimation(handStr.."_"..target, handStr.."_grip", uevrUtils.isButtonPressed(state, hand == Handed.Right and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER), {duration=animDuration})
 
-				local weaponhandController = uevr.params.vr.get_right_joystick_source()
-				if not (hand == Handed.Right) then weaponhandController = uevr.params.vr.get_left_joystick_source() end
-				local weaponhandRest = uevr.params.vr.get_action_handle(hand == Handed.Right and "/actions/default/in/ThumbrestTouchRight" or "/actions/default/in/ThumbrestTouchLeft")
-				animation.updateAnimation(handStr.."_"..target, handStr.."_thumb", uevr.params.vr.is_action_active(weaponhandRest, weaponhandController), {duration=animDuration})
-			else
-				local weaponHandTriggerValue = (hand == Handed.Right or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
-				animation.updateAnimation(handStr.."_"..target, handStr.."_trigger_weapon" .. attachmentExtension, weaponHandTriggerValue > 100, {duration=animDuration})
-				local isButtonPressed = uevrUtils.isButtonPressed(state, hand == Handed.Right and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER)
-				animation.updateAnimation(handStr.."_"..target, handStr.."_grip_weapon" .. attachmentExtension, isButtonPressed, {duration=animDuration})
-			end
-		end
-	end
+	-- 			local weaponhandController = uevr.params.vr.get_right_joystick_source()
+	-- 			if not (hand == Handed.Right) then weaponhandController = uevr.params.vr.get_left_joystick_source() end
+	-- 			local weaponhandRest = uevr.params.vr.get_action_handle(hand == Handed.Right and "/actions/default/in/ThumbrestTouchRight" or "/actions/default/in/ThumbrestTouchLeft")
+	-- 			animation.updateAnimation(handStr.."_"..target, handStr.."_thumb", uevr.params.vr.is_action_active(weaponhandRest, weaponhandController), {duration=animDuration})
+	-- 		else
+	-- 			local weaponHandTriggerValue = (hand == Handed.Right or overrideTrigger) and state.Gamepad.bRightTrigger or state.Gamepad.bLeftTrigger
+	-- 			animation.updateAnimation(handStr.."_"..target, handStr.."_trigger_weapon" .. attachmentExtension, weaponHandTriggerValue > 100, {duration=animDuration})
+	-- 			local isButtonPressed = uevrUtils.isButtonPressed(state, hand == Handed.Right and XINPUT_GAMEPAD_RIGHT_SHOULDER or XINPUT_GAMEPAD_LEFT_SHOULDER)
+	-- 			animation.updateAnimation(handStr.."_"..target, handStr.."_grip_weapon" .. attachmentExtension, isButtonPressed, {duration=animDuration})
+	-- 		end
+	-- 	end
+	-- end
 end
 
 function M.hideHand(hand, val)
@@ -744,6 +765,8 @@ function M.destroyHands()
 	--since we didnt use an existing actor as parent in createComponent(), destroy the owner actor too
 	for name, components in pairs(handComponents) do
 		M.print("Destroying " .. name .. " hand components", LogLevel.Debug)
+		handsAnimation.destroyAnimationHandler(components[0])
+		handsAnimation.destroyAnimationHandler(components[1])
 		uevrUtils.detachAndDestroyComponent(components[0], true)
 		uevrUtils.detachAndDestroyComponent(components[1], true)
 	end
@@ -895,16 +918,26 @@ function M.setFingerAngles(fingerIndex, jointIndex, angleID, angle, componentNam
 	end
 end
 
-uevrUtils.registerUEVRCallback("gunstock_transform_change", function(id, newLocation, newRotation)
-	local initialRotation = uevrUtils.rotator(0,0,0)
-	if handDefinitions["Arms"] ~= nil and handDefinitions["Arms"]["InitialTransform"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"]["rotation"] ~= nil then
-		local rot = handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"]["rotation"]
-		initialRotation = uevrUtils.rotator(rot[1], rot[2], rot[3])
+uevrUtils.registerUEVRCallback("gunstock_transform_change", function(id, newLocation, newRotation, newOffhandLocationOffset)
+	-- if status["offhandOffset"] == nil then status["offhandOffset"] = {} end
+	-- status["offhandOffset"][id] = newOffhandLocationOffset
+	--print("gunstock_transform_change callback received for id: ", id, newOffhandLocationOffset.X, newOffhandLocationOffset.Y, newOffhandLocationOffset.Z, status["offhandOffset"])
+
+	-- local initialRotation = uevrUtils.rotator(0,0,0)
+	-- if handDefinitions["Arms"] ~= nil and handDefinitions["Arms"]["InitialTransform"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"] ~= nil and handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"]["rotation"] ~= nil then
+	-- 	local rot = handDefinitions["Arms"]["InitialTransform"]["right_hand"]["hand_r"]["rotation"]
+	-- 	initialRotation = uevrUtils.rotator(rot[1], rot[2], rot[3])
+	-- end
+	-- initialRotation.Pitch = initialRotation.Pitch - newRotation.Yaw
+	-- initialRotation.Yaw = initialRotation.Yaw + newRotation.Pitch
+	-- initialRotation.Roll = initialRotation.Roll - newRotation.Roll
+	-- animation.setBoneRotation(M.getHandComponent(Handed.Right), "hand_r", initialRotation, false)
+	if gunstockOffsetsEnabled then
+		local hand = M.getHandComponent(Handed.Right)
+		if hand ~= nil then
+			hand.RelativeRotation = newRotation
+		end
 	end
-	initialRotation.Pitch = initialRotation.Pitch - newRotation.Yaw
-	initialRotation.Yaw = initialRotation.Yaw + newRotation.Pitch
-	initialRotation.Roll = initialRotation.Roll - newRotation.Roll
-	animation.setBoneRotation(M.getHandComponent(Handed.Right), "hand_r", initialRotation, false)
 end)
 
 function M.printHandTranforms(transforms)
@@ -1140,16 +1173,19 @@ local isLeftAnimatingLast = nil
 local isRightAnimatingLast = nil
 uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
 	if M.exists() then
+		local isLeftAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Left))
+		local isRightAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Right))
+
 		--if accessory proximity testing has determined it needs to override animation behavior then use that, otherwise call the normal montage callback
 		--may want to set a priority for the accessory override to allow default behavior to have a higher priority but cant think of a use case right now
-		local isLeftAnimating = accessoryStatus["leftProximityAnimationOverride"]
-		if isLeftAnimating == nil then
-			isLeftAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Left))
-		end
-		local isRightAnimating = accessoryStatus["rightProximityAnimationOverride"]
-		if isRightAnimating == nil then
-			isRightAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Right))
-		end
+		-- local isLeftAnimating = accessoryStatus["leftProximityAnimationOverride"]
+		-- if isLeftAnimating == nil then
+		-- 	isLeftAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Left))
+		-- end
+		-- local isRightAnimating = accessoryStatus["rightProximityAnimationOverride"]
+		-- if isRightAnimating == nil then
+		-- 	isRightAnimating = select(1, executeIsAnimatingFromMeshCallback(Handed.Right))
+		-- end
 
 		local left = isLeftAnimating
 		if isLeftAnimatingLast ~= nil and isLeftAnimating == nil then left = false end
@@ -1180,12 +1216,13 @@ end)
 uevrUtils.registerPreLevelChangeCallback(function(level)
 	M.print("Pre-Level changed in hands")
 	M.reset()
-	autoHandleInput = true
+	--autoHandleInput = true
 	isLeftAnimatingLast = nil
 	isRightAnimatingLast = nil
 	autoCreateConfigName = nil
 	autoCreateAnimationName = nil
 	accessoryStatus = {}
+	status = {}
 end)
 
 local function tryAutoCreateHands()
@@ -1233,262 +1270,68 @@ uevrUtils.setInterval(1000, function()
 end)
 
 -- Accessory handlers -------------------------------------
-local function checkMontageProximity(hand, accessoryParams, currentAttachment)
-	local validDistance = true
-	local activationHand = accessoryParams.activation_hand or 1
-	local activationDistance = accessoryParams.activation_distance or 0.0
-	-- activation_hand: 1=None, 2=Left, 3=Right, 4=Either 5=Left with montage 6=Right with Montage 7=Either with montage
-	local handOk =
-		(activationHand == 7) or
-		(activationHand == 5 and hand == Handed.Left) or
-		(activationHand == 6 and hand == Handed.Right)
-	if handOk and activationHand ~= 1 and activationDistance ~= nil and activationDistance > 0 then
-		validDistance = false
-		local controllerLoc = controllers.getControllerLocation(hand)
-		if controllerLoc == nil then return false end
+-- Hand-specific attachment helpers (keep hand-level logic in this file)
+local function saveHandSnapshot(handed, statusKey)
+	local handObj = M.getHandComponent(handed)
+	if uevrUtils.getValid(handObj) == nil then return end
+	accessoryStatus[statusKey] = {
+		parent = handObj.AttachParent,
+		socket = (handObj.AttachSocketName and handObj.AttachSocketName:to_string()) or "",
+		location = {X = handObj.RelativeLocation.X, Y = handObj.RelativeLocation.Y, Z = handObj.RelativeLocation.Z},
+		rotation = {Pitch = handObj.RelativeRotation.Pitch, Yaw = handObj.RelativeRotation.Yaw, Roll = handObj.RelativeRotation.Roll}
+	}
+end
 
-		local targetLoc = nil
-		local targetRot = nil
-		local socketName = accessoryParams.socket_name or ""
-
-		if socketName ~= "" and currentAttachment.GetSocketLocation ~= nil then
-			targetLoc = currentAttachment:GetSocketLocation(uevrUtils.fname_from_string(socketName))
-			targetRot = currentAttachment:GetSocketRotation(uevrUtils.fname_from_string(socketName))
-		elseif currentAttachment.K2_GetComponentLocation ~= nil then
-			targetLoc = currentAttachment:K2_GetComponentLocation()
-			targetRot = currentAttachment:K2_GetComponentRotation()
+local function restoreHandSnapshot(handed)
+	local statusKey = "hand_" .. tostring(handed)
+	local handObj = M.getHandComponent(handed)
+	if uevrUtils.getValid(handObj) == nil then return end
+	local s = accessoryStatus[statusKey]
+	if handObj ~= nil and s ~= nil and handObj.K2_AttachTo ~= nil then
+		local parent = s.parent
+		local socket = s.socket
+		local location = s.location
+		local rotation = s.rotation
+		if parent ~= nil then
+			handObj:K2_AttachTo(parent, uevrUtils.fname_from_string(socket or ""), 0, false)
+			uevrUtils.set_component_relative_transform(handObj, location or {0,0,0}, rotation or {0,0,0})
 		end
-		if targetLoc ~= nil then
-			targetLoc = targetLoc + uevrUtils.rotateVector(uevrUtils.vector(accessoryParams.location or {0,0,0}), targetRot)
-			--targetLoc = targetLoc + uevrUtils.vector(accessoryParams.location or {0,0,0})
-			local d = uevrUtils.distanceBetween(controllerLoc, targetLoc)
-			if d ~= nil and d <= activationDistance then
-				validDistance = true
-			end
-		end
+		accessoryStatus[statusKey] = nil
 	end
-	return validDistance
 end
 
-local function executeIsRightAccessoryCallback(...)
-	return uevrUtils.executeUEVRCallbacksWithPriorityResult("active_right_accessory", table.unpack({...}))
-end
-
-local function executeIsLeftAccessoryCallback(...)
-	return uevrUtils.executeUEVRCallbacksWithPriorityResult("active_left_accessory", table.unpack({...}))
-end
-
-function M.attachHandToAccessory(handed, accessoryID, useMontageProximity)
-    if accessoryID == nil then
-        --detach hand
-        local hand = M.getHandComponent(handed)
-		local statusKey = "hand_" .. tostring(handed)
-        if hand ~= nil and hand.K2_AttachTo ~= nil and accessoryStatus[statusKey] ~= nil then
-            --restore previous state
-            local parent = accessoryStatus[statusKey]["parent"]
-            local socket = accessoryStatus[statusKey]["socket"]
-            local location = accessoryStatus[statusKey]["location"]
-            local rotation = accessoryStatus[statusKey]["rotation"]
-            if parent ~= nil then
-				print("Restoring current hand attachment state for hand ", accessoryStatus[statusKey].location.X, accessoryStatus[statusKey].location.Y, accessoryStatus[statusKey].location.Z, accessoryStatus[statusKey].rotation.Pitch, accessoryStatus[statusKey].rotation.Yaw, accessoryStatus[statusKey].rotation.Roll)
-                hand:K2_AttachTo(parent, uevrUtils.fname_from_string(socket or ""), 0, false)
-                uevrUtils.set_component_relative_transform(hand, location or {0,0,0}, rotation or {0,0,0})
-           	end
-			accessoryStatus["hand_" .. tostring(handed)] = nil
-        end
-		-- Reset grip animation to open hand
-		holdingAttachment[handed] = nil
-		M.updateAnimationState(handed)
-    else
-        local accessoryParams = accessories.getAccessoryParams(accessoryID)
-        local hand = M.getHandComponent(handed)
-        if accessoryParams ~= nil and hand ~= nil then
-            local currentAttachment = attachments.getCurrentGrippedAttachment(Handed.Right)
-           if currentAttachment ~= nil then
-				--check proximity
-				local proximityOK = true
-				if useMontageProximity then proximityOK = checkMontageProximity(handed, accessoryParams, currentAttachment) end
-				if proximityOK then
-					local statusKey = "hand_" .. tostring(handed)
-					-- Only snapshot the base state once per activation chain.
-					-- If we overwrite this while already attached, restore will be broken.
-					if accessoryStatus[statusKey] == nil then
-						accessoryStatus[statusKey] = {
-							parent = hand.AttachParent,
-							socket = hand.AttachSocketName:to_string(),
-							location = {X = hand.RelativeLocation.X, Y = hand.RelativeLocation.Y, Z = hand.RelativeLocation.Z},
-							rotation = {Pitch = hand.RelativeRotation.Pitch, Yaw = hand.RelativeRotation.Yaw, Roll = hand.RelativeRotation.Roll}
-						}
-					end
-
-					print("Saved current hand attachment state for hand ", accessoryStatus["hand_" .. tostring(handed)].location.X, accessoryStatus["hand_" .. tostring(handed)].location.Y, accessoryStatus["hand_" .. tostring(handed)].location.Z, accessoryStatus["hand_" .. tostring(handed)].rotation.Pitch, accessoryStatus["hand_" .. tostring(handed)].rotation.Yaw, accessoryStatus["hand_" .. tostring(handed)].rotation.Roll)
-					local socketName = accessoryParams.socket_name or ""
-					print("Attaching hand to socket: " .. tostring(socketName), accessoryParams.attach_type)
-					hand:K2_AttachTo(currentAttachment, uevrUtils.fname_from_string(socketName), accessoryParams.attach_type or 0, false)
-					uevrUtils.set_component_relative_transform(hand, accessoryParams.location or {0,0,0}, accessoryParams.rotation or {0,0,0})
-
-					-- Set grip animation from accessory params
-					local gripAnim = accessoryParams.grip_animation
-					holdingAttachment[handed] = (gripAnim and gripAnim ~= "") and gripAnim or nil
-					M.updateAnimationState(handed)
-				elseif useMontageProximity then
-					--stop the current montage
-					if handed == Handed.Left then
-						accessoryStatus["leftProximityAnimationOverride"] = false
-					else
-						accessoryStatus["rightProximityAnimationOverride"] = false
-					end
-					--M.print("Hand is not within activation distance for this accessory.", LogLevel.Warning)
-				end
-            end
-        end
-    end
-    --M.print("Accessory ID: " .. tostring(accessoryID) .. " not found for attachment.", LogLevel.Warning)
-end
-
-
--- Goal: re-apply current “active_*_accessory” when preview pokes,
--- even if the GUID didn’t change (so transforms update live).
-local function refreshAccessoryForHand(handed, force)
-    local activeAccessory = nil
-    if handed == Handed.Right then
-        activeAccessory = select(1, executeIsRightAccessoryCallback())
-    else
-        activeAccessory = select(1, executeIsLeftAccessoryCallback())
-    end
-
-    local key = (handed == Handed.Right) and "activeRightAccessory" or "activeLeftAccessory"
-
-    if force then
-        -- IMPORTANT: detach first so we restore original state,
-        -- then attach again so it saves original state correctly.
-		--TODO This is ugly to detach, reattach. look for a better way
-        M.attachHandToAccessory(handed, nil)
-        M.attachHandToAccessory(handed, activeAccessory)
-        accessoryStatus[key] = activeAccessory
-        return
-    end
-
-    -- Normal behavior (only on change)
-    if activeAccessory ~= accessoryStatus[key] then
-        accessoryStatus[key] = activeAccessory
-        M.attachHandToAccessory(handed, activeAccessory)
-    end
-end
-
-uevrUtils.registerUEVRCallback("on_accessory_preview_changed", function(handed, accessoryID, enabled)
-    -- Force re-apply for the requested hand (so socket/transform edits show immediately)
-    refreshAccessoryForHand(handed, true)
-end)
-
------------------------------------------------------------
-
--- Proximity accessory activation ---------------------------------
-local PROXIMITY_ACCESSORY_PRIORITY = 0
-
-local function proximityAccessoryForHand(hand)
-	local attachmentHand = Handed.Right
-    local attachment = attachments.getCurrentGrippedAttachment(attachmentHand)
-    if attachment == nil then return nil end
-
-    local attachmentID = attachments.getAttachmentIDFromAttachment(attachment)-- attachments.getActiveAttachmentID(attachmentHand)
-    if attachmentID == nil or attachmentID == "" then return nil end
-
-    local list = accessories.getAccessoriesForAttachment(attachmentID)
-    if list == nil then return nil end
-
-    local bestAccessoryID = nil
-    local bestDistance = nil
-
-    for accessoryID, p in pairs(list) do
-        local activationHand = p.activation_hand or 1
-        local activationDistance = p.activation_distance or 0.0
-
-        -- activation_hand: 1=None, 2=Left, 3=Right, 4=Either
-        local handOk =
-            (activationHand == 4) or
-            (activationHand == 2 and hand == Handed.Left) or
-            (activationHand == 3 and hand == Handed.Right)
-
-        if handOk and activationHand ~= 1 and activationDistance ~= nil and activationDistance > 0 then
-			local controllerLoc = controllers.getControllerLocation(hand)
-			if controllerLoc == nil then return nil end
-
-            local targetLoc = nil
-            local targetRot = nil
-            local socketName = p.socket_name or ""
-
-            if socketName ~= "" and attachment.GetSocketLocation ~= nil then
-				targetRot = attachment:GetSocketRotation(uevrUtils.fname_from_string(socketName))
-                targetLoc = attachment:GetSocketLocation(uevrUtils.fname_from_string(socketName))
-            elseif attachment.K2_GetComponentLocation ~= nil then
-				targetRot = attachment:K2_GetComponentRotation()
-                targetLoc = attachment:K2_GetComponentLocation()
-            end
-
-            if targetLoc ~= nil then
-				targetLoc = targetLoc + uevrUtils.rotateVector(uevrUtils.vector(p.location or {0,0,0}), targetRot)
-                local d = uevrUtils.distanceBetween(controllerLoc, targetLoc)
-                if d ~= nil and d <= activationDistance then
-                    if bestDistance == nil or d < bestDistance then
-                        bestDistance = d
-                        bestAccessoryID = accessoryID
-                    end
-                end
-            end
-        end
-    end
-
-    return bestAccessoryID
-end
-
--- Feed proximity as another "opinion" into the same montage/preview resolution path.
-uevrUtils.registerUEVRCallback("active_left_accessory", function()
-    local id = proximityAccessoryForHand(Handed.Left)
-    if id ~= nil then
-        return id, PROXIMITY_ACCESSORY_PRIORITY
-    end
-end)
-
-uevrUtils.registerUEVRCallback("active_right_accessory", function()
-    local id = proximityAccessoryForHand(Handed.Right)
-    if id ~= nil then
-        return id, PROXIMITY_ACCESSORY_PRIORITY
-    end
-end)
-
-local function checkAccessories(isMontage)
-    local activeRightAccessory, priority = executeIsRightAccessoryCallback()
-	--M.print("Checked active right accessory: " .. tostring(activeRightAccessory) .. " with priority " .. tostring(priority))
-    if activeRightAccessory ~= accessoryStatus["activeRightAccessory"] then
-        accessoryStatus["activeRightAccessory"] = activeRightAccessory
-        print("Active right accessory changed to: " .. tostring(activeRightAccessory))
-        M.attachHandToAccessory(Handed.Right, activeRightAccessory, isMontage)
-    end
-
-    local activeLeftAccessory, priority = executeIsLeftAccessoryCallback()
-	--M.print("Checked active left accessory: " .. tostring(activeLeftAccessory) .. " with priority " .. tostring(priority))
-    if activeLeftAccessory ~= accessoryStatus["activeLeftAccessory"] then
-        accessoryStatus["activeLeftAccessory"] = activeLeftAccessory
-        print("Active left accessory changed to: " .. tostring(activeLeftAccessory))
-        M.attachHandToAccessory(Handed.Left, activeLeftAccessory, isMontage)
-    end
-end
-
-uevrUtils.registerUEVRCallback("on_module_montage_change", function(montageObject, montageName, label)
-	checkAccessories(montageName ~= nil and montageName ~= "") --sending this param allows for montage based proximity checks
-	if montageName == nil or montageName == "" then
-		--montage ended, if we had a proximity override active, re-check proximity to see if we need to re-apply it
-		accessoryStatus["leftProximityAnimationOverride"] = nil
-		accessoryStatus["rightProximityAnimationOverride"] = nil
+local function attachHandToTarget(handed, parentAttachment, socketName, attachType, loc, rot)
+	local handObj = M.getHandComponent(handed)
+	if uevrUtils.getValid(handObj) == nil then return end
+	local statusKey = "hand_" .. tostring(handed)
+	if accessoryStatus[statusKey] == nil then
+		saveHandSnapshot(handed, statusKey)
 	end
+	if handObj.K2_AttachTo ~= nil then
+		handObj:K2_AttachTo(parentAttachment, uevrUtils.fname_from_string(socketName or ""), attachType or 0, false)
+		uevrUtils.set_component_relative_transform(handObj, loc or {0,0,0}, rot or {0,0,0})
+	end
+end
+
+
+uevrUtils.registerUEVRCallback("on_accessory_attach", function(handed, parentAttachment, socketName, attachType, loc, rot)
+	attachHandToTarget(handed, parentAttachment, socketName, attachType, loc, rot)
+end)
+uevrUtils.registerUEVRCallback("on_accessory_detach", function(handed)
+	restoreHandSnapshot(handed)
+end)
+uevrUtils.registerUEVRCallback("on_accessory_animation", function(handed, anim)
+	M.setHoldingAttachment(handed, anim)
 end)
 
--- Monitor for activation distance changes (since montage callbacks won't fire when proximity changes).
-uevrUtils.setInterval(300, function()
-	checkAccessories()
-end)
--- ----------------------------------------------------------------
+-- At the end of a montage triggered hand animation make sure to go back
+-- to the attachment grip animation if any
+-- uevrUtils.registerUEVRCallback("on_module_montage_change", function(montageObject, montageName, label, animInstance)
+-- 	if montageName == nil or montageName == "" then
+-- 		M.updateAnimationState(Handed.Left)
+-- 		M.updateAnimationState(Handed.Right)
+-- 	end
+-- end)
 
 return M
 
