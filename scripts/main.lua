@@ -43,7 +43,7 @@ hands.setAutoCreateHands(false)
 
 local status = {}
 
-local versionTxt = "v1.0.1"
+local versionTxt = "v1.0.2"
 local title = "A Quiet Place: The Road Ahead, First Person Mod " .. versionTxt
 local configDefinition = {
 	{
@@ -137,6 +137,30 @@ local specialAttachOptions = {
 -- 	allowRenderInMainPassHandling = true,
 -- }
 
+function FixMaterials(component, enable)
+    if enable == nil then enable = true end
+	if component ~= nil then
+        --print("Fixing materials for component:", component:get_full_name())
+		local materials = component.OverrideMaterials
+		if materials ~= nil then
+			--print("Found " .. #materials .. " materials on component")
+			for i = 1 , #materials do
+				materials[i]:SetScalarParameterValue("Scale In Depth", enable and 1.0 or 0.0)
+			end
+		end
+	end
+end
+
+function FixMaterialsForComponents(components, enable)
+	if components ~= nil then
+		for j = 1 , #components do
+			if components[j]~= nil then
+				FixMaterials(components[j], enable)
+			end
+		end
+	end
+end
+
 local function createCrank(meshComponent)
     local result = nil
     if meshComponent ~= nil then
@@ -200,6 +224,8 @@ local function getWeaponMesh()
                     weaponMeshRight = status["valveChild"]
                     if weaponMeshRight == nil then
                         weaponMeshRight = getAttachedChild(rightHeldItem.result.MeshComponent, "Valve Mesh")
+                        --print("Valve mesh found:", weaponMeshRight ~= nil and weaponMeshRight:get_full_name() or "nil")
+                        FixMaterials(weaponMeshRight)
                     end
                     status["valveChild"] = weaponMeshRight
                     attachOptionsRight = specialAttachOptions
@@ -210,6 +236,7 @@ local function getWeaponMesh()
                         weaponMeshRight = createCrank(rightHeldItem.result.MeshComponent)
                         --weaponMeshRight = getAttachedChild(rightHeldItem.result.MeshComponent, "Handle")
                         --print("Crank handle found:", weaponMeshRight:get_full_name())
+                        FixMaterials(weaponMeshRight)
                     end
                     status["crankChild"] = weaponMeshRight
                     attachOptionsRight = defaultAttachOptions
@@ -265,7 +292,6 @@ end)
 
 attachments.registerAttachmentChangeCallback(function(id, gripHand, attachment)
     uevrUtils.fixMeshFOV(attachment, "Clip Offset", 0.0, true, true, false)
-    --uevrUtils.fixMeshFOV(hands.getHandComponent(Handed.Right), "Clip Offset", 0.0, true, true, false)
 end)
 
 function on_montage_change(montageObject, montageName)
@@ -358,26 +384,18 @@ local function attachGasMaskEffectToHMD()
     --print("Failed to attach mask effect to hud")
 end
 
+local HandsType = {
+	Forearms = 1,
+	IKArms = 2,
+}
 local function regenerateHands(value)
-	--detach attachments first so they dont get "lost" when hands are destroyed
-	-- attachments.detachGripAttachments(Handed.Right)
-	-- attachments.detachGripAttachments(Handed.Left)
+    hands.setAutoCreateHands(value == HandsType.Forearms)
+    ik.setAutoCreateArms(value == HandsType.IKArms)
 
-    hands.setAutoCreateHands(value == 1)
+    status["ikMeshComponent"] = nil
     hands.destroyHands()
     ik.destroyAll()
-    status["ikMeshComponent"] = nil
-    if value == 2 then
-        -- First scene montage uses wrong hands if we dont delay here
-        -- status param prevents multiple IK creations during rapid level changes
-        status.creatingIKCount = status.creatingIKCount ~= nil and status.creatingIKCount + 1 or 1
-        delay(2000, function()
-            status.creatingIKCount = status.creatingIKCount - 1
-            if status.creatingIKCount == 0 then
-                ik.new({ animationsFile = "hands_parameters" })
-            end
-        end)
-    end
+
 end
 
 function on_level_change()
@@ -400,19 +418,49 @@ setInterval(1000, function()
     end
 end)
 
-ik.registerOnMeshCreatedCallback(function(meshComponent, ikInstance)
+ik.registerOnMeshCreatedCallback(function(meshComponentList, ikInstance)
     --print("IK Mesh created:", meshComponent ~= nil, ikInstance ~= nil and ikInstance.rigId or "")
+    local meshComponent = meshComponentList and meshComponentList[1] or nil
     if meshComponent ~= nil then
         meshComponent.bCastDynamicShadow = false
         meshComponent.bRenderInDepthPass = false
         animation.setComponent("left_arms", meshComponent)
 		animation.setComponent("right_arms", meshComponent)
         status["ikMeshComponent"] = meshComponent
+        FixMaterials(meshComponent)
     end
 end)
 
 configui.onUpdate("hands_type", function(value)
     regenerateHands(value)
+end)
+
+setInterval(500, function()
+    local handComponents = hands.getAllHandComponents()
+    for i = 1, #handComponents do
+        FixMaterials(handComponents[i])
+    end
+
+    if uevrUtils.getValid(pawn) ~= nil then
+    	local skeletalMeshComponentClass = uevrUtils.get_class("Class /Script/Engine.SkeletalMeshComponent")
+		local staticMeshComponentClass = uevrUtils.get_class("Class /Script/Engine.StaticMeshComponent")
+		local children = pawn.Children
+		if children ~= nil then
+			--print("Found " .. #children .. " children on pawn")
+			for i = 1 , #children do
+				if children[i]~= nil then
+					if skeletalMeshComponentClass ~= nil then
+						local components = children[i]:K2_GetComponentsByClass(skeletalMeshComponentClass)
+						FixMaterialsForComponents(components)
+					end
+					if staticMeshComponentClass ~= nil then
+						local components = children[i]:K2_GetComponentsByClass(staticMeshComponentClass)
+						FixMaterialsForComponents(components)
+					end
+				end
+			end
+		end
+    end
 end)
 
 
